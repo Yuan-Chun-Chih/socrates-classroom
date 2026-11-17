@@ -39,11 +39,11 @@ function JoinPage() {
     setSubmitting(true);
     setFailed(null);
     try {
-      const { activityId, user } = await api.joinAsGuest(code, name.trim());
-      queryClient.setQueryData(["me"], user);
+      const joined = await api.joinAsGuest(code, name.trim());
+      queryClient.setQueryData(["me"], joined.user);
       await navigate({
         to: "/dialogue",
-        search: { activityId, ...(draft ? { q: draft } : {}) },
+        search: { activityId: joined.activityId, ...(draft ? { q: draft } : {}) },
       });
     } catch (error) {
       const code = error instanceof ApiError ? error.code : null;
@@ -52,9 +52,7 @@ function JoinPage() {
           ? t("join_err_name_taken")
           : code === "activity_finished"
             ? t("join_err_finished")
-            : code === "only_student"
-              ? t("join_only_student")
-              : t("join_failed"),
+            : t("join_failed"),
       );
     } finally {
       setSubmitting(false);
@@ -75,9 +73,7 @@ function JoinPage() {
               <p className="text-[15px] text-ink-soft">
                 {info.error instanceof ApiError && info.error.code === "rate_limited"
                   ? t("join_failed")
-                  : info.error instanceof ApiError && info.error.code === "only_student"
-                    ? t("join_only_student")
-                    : t("join_invalid")}
+                  : t("join_invalid")}
               </p>
               <Button variant="outline" onClick={() => void navigate({ to: "/" })}>
                 {t("common_back")}

@@ -14,8 +14,8 @@ import { PiHarness, type PiReceipt, type PiSession, type PiSubmitOptions, ROOT_S
 import { Lifecycle } from "agents/lifecycle";
 import { WebSockets } from "agents/websockets";
 import type { Env } from "../env";
-import { SESSION_COOKIE, userFromSessionToken } from "../auth";
-import { requireMembership } from "../services/members";
+import { SESSION_COOKIE, PARTICIPANT_COOKIE, accountState, lookupParticipant, lookupSession } from "../auth";
+import { activityAccess, participantOf } from "../services/members";
 import { createAvatarExtension } from "../pi/extensions/avatar";
 import { createJudgmentExtension } from "../pi/extensions/judgment";
 import { createWebSearchExtension } from "../pi/extensions/websearch";
@@ -28,7 +28,7 @@ import { teacherLegsOf, teacherOfActivity, type TeacherLeg } from "../pi/credent
 import { one } from "../db/d1";
 import { getRouter } from "../gateway/router";
 import { ApiError } from "@socrates/shared";
-import { ChatSockets } from "../ws/sockets";
+import { ChatSockets, type ReverifyOutcome, type SocketIdentity } from "../ws/sockets";
 
 class ActivityFinishedError extends Error {
   constructor() {
@@ -89,8 +89,9 @@ export class Chat extends DurableObject<Env> {
     (tag) => this.ctx.getWebSockets(tag),
     (request) => this.authorize(request),
     (handle, input, options) => this.routeSubmit(handle, input, options),
-    (userId) => userId === this.studentId,
+    (identity) => this.canSubmit(identity),
     () => forkBtw(this.harness, this.btw),
+    (identity) => this.revalidate(identity),
   );
   readonly webSockets = new WebSockets(this.sockets.options());
   readonly lifecycle = Lifecycle.install(this).use(this.webSockets).use(this.harness);
@@ -104,7 +105,7 @@ export class Chat extends DurableObject<Env> {
   }
 
   async onStart(): Promise<void> {
-    await this.sockets.reattach(this.webSockets.getConnections(), (userId) => this.reverify(userId));
+    await this.sockets.reattach(this.webSockets.getConnections(), (identity) => this.reverify(identity));
   }
 
   private async teacherId(): Promise<string | null> {
@@ -185,44 +186,87 @@ export class Chat extends DurableObject<Env> {
     return { messages, violations: deduped };
   }
 
-  private get studentId(): string {
-    return this.ctx.id.name?.split(":")[1] ?? "";
+  private async canSubmit(identity: SocketIdentity): Promise<boolean> {
+    const [activityId, participantId] = this.ctx.id.name?.split(":") ?? [];
+    if (!activityId || !participantId || identity.participantId !== participantId) return false;
+    const participant = await participantOf(this.env.DB, activityId, participantId);
+    if (!participant) return false;
+    return participant.user_id === identity.userId;
   }
 
-  private async authorize(request: Request): Promise<string | null> {
+  private async authorize(request: Request): Promise<SocketIdentity | null> {
     const name = decodeURIComponent(new URL(request.url).pathname.split("/chat/").at(-1) ?? "");
-    const [activityId, studentId] = name.split(":");
-    if (!activityId || !studentId) return null;
+    const [activityId, participantId] = name.split(":");
+    if (!activityId || !participantId) return null;
     const cookie = request.headers.get("Cookie") ?? "";
-    const token = cookie
-      .split(";")
-      .map((part) => part.trim())
-      .find((part) => part.startsWith(`${SESSION_COOKIE}=`))
-      ?.slice(SESSION_COOKIE.length + 1);
-    const user = await userFromSessionToken({ env: this.env }, token);
-    if (!user) return null;
-    try {
-      const { isTeacher } = await requireMembership(this.env.DB, activityId, user);
-      return isTeacher || user.id === studentId ? user.id : null;
-    } catch {
-      return null;
+    const lookup = await lookupSession(this.env, cookieValue(cookie, SESSION_COOKIE));
+    if (lookup.kind === "ok") {
+      const identity: SocketIdentity = {
+        userId: lookup.session.user.id,
+        participantId,
+        version: lookup.session.version,
+      };
+      const access = await activityAccess(this.env.DB, activityId, {
+        user: lookup.session.user,
+        participant: null,
+      }).catch(() => null);
+      if (access && (access.isTeacher || access.participant?.id === participantId)) return identity;
+      const ownedHere = await participantOf(this.env.DB, activityId, participantId);
+      return ownedHere?.user_id === lookup.session.user.id ? identity : null;
     }
+    if (lookup.kind !== "missing") return null;
+    const held = await lookupParticipant(this.env, cookieValue(cookie, PARTICIPANT_COOKIE));
+    if (!held || held.activityId !== activityId || held.participantId !== participantId) return null;
+    const participant = await participantOf(this.env.DB, activityId, participantId);
+    if (!participant || participant.user_id !== null) return null;
+    return { userId: null, participantId, version: null };
   }
 
-  private async reverify(userId: string): Promise<"member" | "revoked" | "error"> {
-    const [activityId, studentId] = this.ctx.id.name?.split(":") ?? [];
-    if (!activityId) return "revoked";
+  private async reverify(identity: SocketIdentity): Promise<ReverifyOutcome> {
+    const [activityId, participantId] = this.ctx.id.name?.split(":") ?? [];
+    if (!activityId || !participantId || identity.participantId !== participantId) return "revoked";
     try {
-      const { isTeacher } = await requireMembership(this.env.DB, activityId, {
-        id: userId,
-        name: "",
-        role: "student",
+      if (identity.userId === null) {
+        const participant = await participantOf(this.env.DB, activityId, participantId);
+        return participant && participant.user_id === null ? "member" : "revoked";
+      }
+      const state = await accountState(this.env.DB, identity.userId);
+      if (!state || state.disabled || state.version !== identity.version) return "revoked";
+      const participant = await participantOf(this.env.DB, activityId, participantId);
+      if (participant?.user_id === identity.userId) return "member";
+      const access = await activityAccess(this.env.DB, activityId, {
+        user: { id: identity.userId },
+        participant: null,
       });
-      return isTeacher || userId === studentId ? "member" : "revoked";
+      return access.isTeacher ? "member" : "revoked";
     } catch (error) {
       return error instanceof ApiError ? "revoked" : "error";
     }
   }
+
+  private async revalidate(identity: SocketIdentity): Promise<ReverifyOutcome> {
+    try {
+      if (identity.userId === null) {
+        const [activityId, participantId] = this.ctx.id.name?.split(":") ?? [];
+        if (!activityId || !participantId || identity.participantId !== participantId) return "revoked";
+        const participant = await participantOf(this.env.DB, activityId, participantId);
+        return participant && participant.user_id === null ? "member" : "revoked";
+      }
+      const state = await accountState(this.env.DB, identity.userId);
+      if (!state || state.disabled || state.version !== identity.version) return "revoked";
+      return "member";
+    } catch {
+      return "error";
+    }
+  }
+}
+
+function cookieValue(header: string, name: string): string | undefined {
+  return header
+    .split(";")
+    .map((part) => part.trim())
+    .find((part) => part.startsWith(`${name}=`))
+    ?.slice(name.length + 1);
 }
 
 function fauxSocraticScript(context: TranscriptContext): AssistantMessage {

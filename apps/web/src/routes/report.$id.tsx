@@ -18,7 +18,7 @@ function ReportPage() {
   const { id } = Route.useParams();
   const navigate = useNavigate();
   const me = useQuery({ queryKey: ["me"], queryFn: () => api.me(), staleTime: Infinity, enabled: false });
-  const isTeacher = me.data?.role === "teacher";
+  const isTeacher = me.data?.canManageClasses ?? false;
   const [view, setView] = useState<"group" | "individual">("group");
   const [studentIdx, setStudentIdx] = useState(0);
   const report = useQuery({
@@ -93,7 +93,7 @@ function ReportPage() {
 
       {!isTeacherView && (
         <section className="mt-6 flex flex-col gap-6">
-          <p className="text-[14px] text-ink-soft">{person.pseudonym}</p>
+          <p className="text-[14px] text-ink-soft">{person.participantName}</p>
           <Positions positions={person.positions} />
           <Analysis analysis={person.analysis} violations={person.violations} />
         </section>
@@ -154,7 +154,7 @@ function ReportPage() {
             {data.students.map((student, index) => (
               <button
                 type="button"
-                key={student.studentId}
+                key={student.participantId}
                 onClick={() => setStudentIdx(index)}
                 className={cn(
                   "rounded-full border px-3.5 py-1.5 text-[13px] transition-colors",
@@ -163,7 +163,10 @@ function ReportPage() {
                     : "border-line bg-card text-ink-soft",
                 )}
               >
-                {student.pseudonym}
+                {student.participantName}
+                {student.participantName === student.pseudonym ? null : (
+                  <span className="ml-1.5 text-ink-faint">· {student.pseudonym}</span>
+                )}
               </button>
             ))}
           </div>

@@ -7,8 +7,11 @@ import { DialogueView } from "@/components/DialogueView";
 import { useT } from "@/i18n";
 
 export const Route = createFileRoute("/dialogue")({
-  validateSearch: (search: Record<string, unknown>): { activityId?: string; q?: string; term?: string } => ({
+  validateSearch: (
+    search: Record<string, unknown>,
+  ): { activityId?: string; slot?: string; q?: string; term?: string } => ({
     activityId: typeof search.activityId === "string" ? search.activityId : undefined,
+    slot: typeof search.slot === "string" ? search.slot : undefined,
     q: typeof search.q === "string" ? search.q : undefined,
     term: typeof search.term === "string" ? search.term : undefined,
   }),
@@ -18,9 +21,8 @@ export const Route = createFileRoute("/dialogue")({
       queryFn: () => api.me(),
       staleTime: Infinity,
     });
-    if (me?.role === "teacher") throw redirect({ to: "/t/setup" });
-    if (!me) throw redirect({ to: "/join" });
-    if (!(search.activityId || readActivityId())) throw redirect({ to: "/home" });
+    const activityId = search.activityId ?? readActivityId();
+    if (!activityId) throw redirect({ to: me ? "/home" : "/join" });
   },
   component: DialoguePage,
 });
@@ -29,24 +31,26 @@ function DialoguePage() {
   const t = useT();
   const navigate = useNavigate();
   const me = useQuery({ queryKey: ["me"], queryFn: () => api.me(), staleTime: Infinity });
-  const { activityId: activityParam, q, term } = Route.useSearch();
+  const { activityId: activityParam, slot, q, term } = Route.useSearch();
   const activityId = activityParam ?? readActivityId() ?? "";
   const activityQuery = useQuery({
-    queryKey: ["activity", activityId],
-    queryFn: () => api.activityInfo(activityId),
+    queryKey: ["activity", activityId, slot ?? null],
+    queryFn: () => api.activityInfo(activityId, slot),
     enabled: activityId !== "",
     staleTime: Infinity,
   });
   const activityRefetch = useCallback(() => void activityQuery.refetch(), [activityQuery.refetch]);
   const topic = activityQuery.data?.topic;
 
-  if (!me.data) return <div className="h-dvh" aria-busy="true" />;
+  if (me.isPending) return <div className="h-dvh" aria-busy="true" />;
+  if (activityQuery.isPending) return <div className="h-dvh" aria-busy="true" />;
+  const participantId = activityQuery.data?.participantId ?? "";
 
   return (
     <DialogueView
-      key={activityId}
+      key={`${activityId}:${participantId}`}
       activityId={activityId}
-      userId={me.data.id}
+      participantId={participantId}
       eyebrow={topic?.title ? t("dlg_topic_eyebrow") : t("dlg_title")}
       title={topic?.title ?? t("dlg_title")}
       statement={topic?.statement}

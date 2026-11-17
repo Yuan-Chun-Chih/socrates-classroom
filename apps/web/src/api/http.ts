@@ -1,24 +1,39 @@
 import { hc } from "hono/client";
 import type {
   ActivityInfo,
+  ActivityInvite,
+  ActivityMode,
+  ActivitySlots,
+  ActivityStarted,
+  AdminUser,
   ClassroomCreated,
   ClassroomSummary,
+  DevAccounts,
+  InviteInfo,
+  InviteJoined,
   JoinInfo,
+  JoinResult,
   Report,
   TeacherKeyStatus,
   TermExplanation,
   Topic,
+  TopicDraft,
   User,
 } from "@socrates/shared";
 import {
   ActivityStartInputSchema,
+  ACTIVITY_SLOT_MAX,
+  AdminUserCreateInputSchema,
+  AdminUserUpdateInputSchema,
   ClassroomCreateInputSchema,
+  DevLoginInputSchema,
   ERROR_CODES,
   GenerateTopicsInputSchema,
   JoinInputSchema,
   LoginInputSchema,
   LookupInputSchema,
   SttResultSchema,
+  TopicCopyInputSchema,
   TopicCreateInputSchema,
   TtsInputSchema,
   type ErrorCode,
@@ -54,16 +69,27 @@ export interface Api {
   login(email: string, password: string): Promise<User>;
   logout(): Promise<void>;
   joinByCode(code: string): Promise<JoinInfo>;
-  joinAsGuest(code: string, name: string): Promise<{ user: User; activityId: string }>;
+  joinAsGuest(code: string, name: string): Promise<JoinResult>;
+  createActivityInvite(activityId: string): Promise<ActivityInvite>;
+  inviteInfo(token: string): Promise<InviteInfo>;
+  joinByInvite(token: string, name: string): Promise<InviteJoined>;
   listTopics(): Promise<Topic[]>;
-  generateTopics(direction: string): Promise<Topic[]>;
-  createClassroom(name: string, topicId: string): Promise<ClassroomCreated>;
+  generateTopics(direction: string): Promise<TopicDraft[]>;
+  createClassroom(name: string): Promise<ClassroomCreated>;
   listClassrooms(): Promise<ClassroomSummary[]>;
-  startActivity(classroomId: string, topicId: string): Promise<ClassroomCreated>;
+  listClassroomTopics(classroomId: string): Promise<Topic[]>;
+  createClassroomTopic(
+    classroomId: string,
+    input: { title: string; statement: string; summary?: string; prompts: string[] },
+  ): Promise<Topic>;
+  copyTopic(topicId: string, classroomId: string): Promise<Topic>;
+  startActivity(classroomId: string, topicId: string, mode?: ActivityMode): Promise<ActivityStarted>;
+  listActivitySlots(activityId: string): Promise<ActivitySlots>;
+  createActivitySlots(activityId: string, count: number): Promise<ActivitySlots>;
   stt(audio: Blob): Promise<string>;
   tts(text: string, onAmplitude: (value: number) => void, signal?: AbortSignal): Promise<void>;
   createTopic(input: { title: string; statement: string; summary?: string; prompts: string[] }): Promise<Topic>;
-  activityInfo(activityId: string): Promise<ActivityInfo>;
+  activityInfo(activityId: string, participantId?: string): Promise<ActivityInfo>;
   finishActivity(activityId: string): Promise<void>;
   report(activityId: string): Promise<Report>;
   lookupTerm(term: string): Promise<TermExplanation>;
@@ -77,6 +103,16 @@ export interface Api {
   ): Promise<{ provider: string; model: string; last4: string }>;
   deleteTeacherKey(provider: string): Promise<void>;
   orderTeacherKeys(providers: string[]): Promise<void>;
+  devAccounts(): Promise<DevAccounts>;
+  devLogin(email: string): Promise<User>;
+  listAdminUsers(): Promise<AdminUser[]>;
+  createAdminUser(input: {
+    name: string;
+    email: string;
+    password: string;
+    canManageClasses: boolean;
+  }): Promise<AdminUser>;
+  updateAdminUser(id: string, input: { canManageClasses?: boolean; disabled?: boolean }): Promise<AdminUser>;
 }
 
 const client = hc<RpcApi>("/api", {
@@ -207,8 +243,24 @@ export const httpApi: Api = {
     return unwrap(await client.join[":code"].$get({ param: { code } }));
   },
   async joinAsGuest(code, name) {
-    const payload = unwrap(await client.join.$post({ json: JoinInputSchema.parse({ code, name, tosAccepted: true }) }));
-    const data = await payload;
+    const data = await raw<JoinResult>("/join", {
+      method: "POST",
+      json: JoinInputSchema.parse({ code, name, tosAccepted: true }),
+    });
+    persistActivityId(data.activityId);
+    return data;
+  },
+  async createActivityInvite(activityId) {
+    return await raw<ActivityInvite>(`/activities/${encodeURIComponent(activityId)}/invites`, { method: "POST" });
+  },
+  async inviteInfo(token) {
+    return await raw<InviteInfo>(`/invites/${encodeURIComponent(token)}`);
+  },
+  async joinByInvite(token, name) {
+    const data = await raw<InviteJoined>(`/invites/${encodeURIComponent(token)}/join`, {
+      method: "POST",
+      json: { name, tosAccepted: true },
+    });
     persistActivityId(data.activityId);
     return data;
   },
@@ -222,16 +274,40 @@ export const httpApi: Api = {
   async createTopic(input) {
     return unwrap(await client.topics.$post({ json: TopicCreateInputSchema.parse(input) }));
   },
-  async createClassroom(name, topicId) {
-    const input = ClassroomCreateInputSchema.parse({ name, topicId });
+  async createClassroom(name) {
+    const input = ClassroomCreateInputSchema.parse({ name });
     return unwrap(await client.classrooms.$post({ json: input }));
   },
   async listClassrooms() {
     return unwrap(await client.classrooms.$get());
   },
-  async startActivity(classroomId, topicId) {
-    const input = ActivityStartInputSchema.parse({ topicId });
-    return raw<ClassroomCreated>(`/classrooms/${classroomId}/activities`, { method: "POST", json: input });
+  async listClassroomTopics(classroomId) {
+    return await raw<Topic[]>(`/classrooms/${encodeURIComponent(classroomId)}/topics`);
+  },
+  async createClassroomTopic(classroomId, input) {
+    return await raw<Topic>(`/classrooms/${encodeURIComponent(classroomId)}/topics`, {
+      method: "POST",
+      json: TopicCreateInputSchema.parse(input),
+    });
+  },
+  async copyTopic(topicId, classroomId) {
+    return await raw<Topic>(`/topics/${encodeURIComponent(topicId)}/copy`, {
+      method: "POST",
+      json: TopicCopyInputSchema.parse({ classroomId }),
+    });
+  },
+  async startActivity(classroomId, topicId, mode = "live") {
+    const input = ActivityStartInputSchema.parse({ topicId, mode });
+    return await raw<ActivityStarted>(`/classrooms/${classroomId}/activities`, { method: "POST", json: input });
+  },
+  async listActivitySlots(activityId) {
+    return raw<ActivitySlots>(`/activities/${encodeURIComponent(activityId)}/slots`);
+  },
+  async createActivitySlots(activityId, count) {
+    return raw<ActivitySlots>(`/activities/${encodeURIComponent(activityId)}/slots`, {
+      method: "POST",
+      json: { count: Math.min(Math.max(count, 1), ACTIVITY_SLOT_MAX) },
+    });
   },
   async stt(audio) {
     const file = audio instanceof File ? audio : new File([audio], "speech.webm", { type: audio.type });
@@ -243,8 +319,9 @@ export const httpApi: Api = {
     return SttResultSchema.parse(await res.json()).text;
   },
   tts: playTts,
-  async activityInfo(activityId) {
-    return unwrap(await client.activities[":id"].$get({ param: { id: activityId } }));
+  async activityInfo(activityId, participantId) {
+    const query = participantId === undefined ? "" : `?participantId=${encodeURIComponent(participantId)}`;
+    return raw<ActivityInfo>(`/activities/${encodeURIComponent(activityId)}${query}`);
   },
   async finishActivity(activityId) {
     await unwrap(await client.activities[":id"].finish.$post({ param: { id: activityId } }));
@@ -278,5 +355,23 @@ export const httpApi: Api = {
   },
   async orderTeacherKeys(providers) {
     await unwrap(await client.settings.keys.order.$put({ json: { providers } }));
+  },
+  async devAccounts() {
+    return raw<DevAccounts>("/dev/accounts");
+  },
+  async devLogin(email) {
+    return raw<User>("/dev/login", { method: "POST", json: DevLoginInputSchema.parse({ email }) });
+  },
+  async listAdminUsers() {
+    return unwrap(await client.admin.users.$get());
+  },
+  async createAdminUser(input) {
+    return raw<AdminUser>("/admin/users", { method: "POST", json: AdminUserCreateInputSchema.parse(input) });
+  },
+  async updateAdminUser(id, input) {
+    return raw<AdminUser>(`/admin/users/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      json: AdminUserUpdateInputSchema.parse(input),
+    });
   },
 };

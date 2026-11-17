@@ -1,8 +1,9 @@
 import { Hono } from "hono";
 import { LoginInputSchema, RegisterInputSchema } from "@socrates/shared";
 import { batch, one } from "../db/d1";
-import { DUMMY_HASH, endSession, hashPassword, startSession, verifyPassword } from "../auth";
+import { DUMMY_HASH, endSession, hashPassword, startSession, toUser, verifyPassword } from "../auth";
 import { enforceIpLimit, fail, langOf, newId, nowIso, parseBody, uniqueViolationColumns, type AppEnv } from "../http";
+import { ensureParticipant } from "../services/members";
 
 interface UserRow {
   id: string;
@@ -10,6 +11,9 @@ interface UserRow {
   role: "student" | "teacher";
   email: string | null;
   password_hash: string | null;
+  can_manage_classes: number;
+  is_admin: number;
+  disabled_at: string | null;
 }
 
 export function authRoutes() {
@@ -23,7 +27,8 @@ export function authRoutes() {
       });
       const ok = await verifyPassword(input.password, row?.password_hash ?? DUMMY_HASH);
       if (!row || !ok) fail(401, "unauthorized");
-      const user = { id: row.id, name: row.name, role: row.role };
+      if (row.disabled_at !== null) fail(403, "account_disabled");
+      const user = toUser(row);
       await startSession(c, user);
       return c.json(user);
     })
@@ -73,7 +78,8 @@ export function authRoutes() {
         if (pairs.some(([table, column]) => table === "members" && column === "name")) fail(409, "name_taken");
         fail(409, "conflict");
       }
-      const user = { id, name: input.name, role: "student" as const };
+      const user = { id, name: input.name, canManageClasses: false, isAdmin: false };
+      await ensureParticipant(c.env.DB, classroom.current_activity_id, user, at);
       await startSession(c, user);
       return c.json(user);
     })

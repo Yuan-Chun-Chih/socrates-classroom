@@ -36,6 +36,21 @@ const M: Record<ErrorCode, Entry> = {
     en: "This invite link is not valid.",
     es: "Este enlace de invitación no es válido.",
   },
+  invite_invalid: {
+    zh: "活動邀請連結無效。",
+    en: "This activity invite link is not valid.",
+    es: "Este enlace de invitación a la actividad no es válido.",
+  },
+  invite_revoked: {
+    zh: "這個活動邀請連結已被撤回。",
+    en: "This activity invite link has been revoked.",
+    es: "Este enlace de invitación a la actividad fue revocado.",
+  },
+  invite_expired: {
+    zh: "這個活動邀請連結已過期。",
+    en: "This activity invite link has expired.",
+    es: "Este enlace de invitación a la actividad ha caducado.",
+  },
   tos_required: {
     zh: "需要同意使用條款才能進入。",
     en: "You must accept the Terms of Service to continue.",
@@ -46,10 +61,15 @@ const M: Record<ErrorCode, Entry> = {
     en: "That name is already taken in this classroom.",
     es: "Ese nombre ya está en uso en esta clase.",
   },
-  only_student: {
-    zh: "只有學生可以進行對話。",
-    en: "Only students can hold this dialogue.",
-    es: "Solo los estudiantes pueden dialogar.",
+  account_disabled: {
+    zh: "這個帳號已停用，請聯絡管理員。",
+    en: "This account is disabled. Contact an administrator.",
+    es: "Esta cuenta está deshabilitada. Contacta a un administrador.",
+  },
+  capability_required: {
+    zh: "你沒有管理班級的權限。",
+    en: "You do not have permission to manage classrooms.",
+    es: "No tienes permiso para administrar clases.",
   },
   already_streaming: {
     zh: "上一則回覆還在產生中。",
