@@ -6,6 +6,64 @@ import { all, run } from "../src/db/d1";
 
 const migrations = inject("d1Migrations");
 
+describe("migration 008: teacher key models", () => {
+  it("splits the per-provider model into (provider, model) legs with their own max_concurrency", async () => {
+    const legacy = migrations.filter((migration) => !/^(003|008)/.test(migration.name));
+    const split = migrations.filter((migration) => migration.name.startsWith("008"));
+    expect(split).toHaveLength(1);
+    await applyD1Migrations(env.DB, legacy);
+
+    const at = "2026-11-18T00:00:00.000Z";
+    await run(
+      env.DB,
+      `INSERT INTO users (id, name, role, email, password_hash, lang, created_at)
+       VALUES ('u_t8', '金鑰老師', 'teacher', 't8@example.com', 'x', 'zh', $at)`,
+      { at },
+    );
+    await run(
+      env.DB,
+      `INSERT INTO teacher_keys (user_id, provider_id, key_enc, last4, model, sort_order, updated_at)
+       VALUES ('u_t8', 'openrouter', 'enc', 'zzzz', 'z-ai/glm-5.3-flash', 3, $at)`,
+      { at },
+    );
+
+    await applyD1Migrations(env.DB, split);
+
+    const legs = await all<{
+      user_id: string;
+      provider_id: string;
+      model: string;
+      max_concurrency: number | null;
+      sort_order: number;
+    }>(env.DB, "SELECT user_id, provider_id, model, max_concurrency, sort_order FROM teacher_key_models");
+    expect(legs).toEqual([
+      { user_id: "u_t8", provider_id: "openrouter", model: "z-ai/glm-5.3-flash", max_concurrency: null, sort_order: 0 },
+    ]);
+
+    const columns = await all<{ name: string }>(env.DB, "PRAGMA table_info(teacher_keys)");
+    expect(columns.map((column) => column.name)).not.toContain("model");
+    expect(columns.map((column) => column.name)).toContain("max_concurrency");
+
+    const existing = await all<{ max_concurrency: number | null }>(
+      env.DB,
+      "SELECT max_concurrency FROM teacher_keys WHERE user_id = 'u_t8'",
+    );
+    expect(existing).toEqual([{ max_concurrency: null }]);
+
+    await run(
+      env.DB,
+      `INSERT INTO teacher_keys (user_id, provider_id, key_enc, last4, sort_order, updated_at, max_concurrency)
+       VALUES ('u_t8', 'deepseek', 'enc', 'aaaa', 1, $at, 6)`,
+      { at },
+    );
+    const fresh = await all<{ max_concurrency: number | null }>(
+      env.DB,
+      "SELECT max_concurrency FROM teacher_keys WHERE user_id = 'u_t8' AND provider_id = 'deepseek'",
+    );
+    expect(fresh).toEqual([{ max_concurrency: 6 }]);
+  });
+});
+
 describe("migration 003: activity participant backfill", () => {
   it("existing members become member participants and keep their pseudonyms", async () => {
     const legacy = migrations.filter((migration) => !migration.name.startsWith("003"));
