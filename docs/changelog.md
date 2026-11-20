@@ -2,6 +2,20 @@
 
 > 分支工作定案後記錄於此（標注分支；合併進主分支時更新連結）。格式參考 [Keep a Changelog](https://keepachangelog.com/zh-TW/1.1.0/)。
 
+## 2026-11-21 — Capability bit 退役：無 mode 帳號模型落地（`feat/210-capability-retirement`，#210）
+
+### Changed
+
+- 帳號模型無 mode 定稿（[`accounts.md`](./accounts.md) §7）實作落地：**任何登入 user 皆可建班與開活動**，`requireCapability("manage_classes")` 全數改為 `requireUser`（`POST /classrooms`、`POST /topics`、`topics/generate`、`POST /classrooms/:id/topics`、`POST /classrooms/:id/activities`、`POST /topics/:id/copy`、`POST /activities/:id/invites`、`/settings/keys/*`）；擁有權檢查（`classroomAccess` 的 isTeacher）照舊，非 owner 對他人班級仍 403 `forbidden`
+- `User`／`AdminUser`／`DevAccount` 形狀移除 `canManageClasses`；`POST /admin/users` 建立帳號不帶能力欄，`PATCH /admin/users/:id` 僅剩 `{disabled}`（停用／復用，一律 bump `session_version`）——admin 的桿子收斂為帳號層：建立＋停用
+- 前端最小接線（同 PR vertical slice）：`t.setup`／`t.live`／`settings` guard 改為登入即入；建班/開活動工具對所有登入 user 顯示；admin 頁「開通/收回權限」UI 退場
+
+### Removed
+
+- Migration `010_retire_capability.sql`：`users.can_manage_classes` 與 legacy `users.role` 欄位一併移除——帳號表不再有任何角色字樣，師生關係只存在於班級關係層；錯誤碼 `capability_required`（`ERROR_CODES`／`messages.ts` 三語）退場
+- 錯誤碼清理（#221）：`already_streaming`（「舊客戶端」不存在——單一消費者原子部署）與未接線的保留碼 `llm_rate_limited`/`llm_timeout` 刪除——pi-durable 將上游失敗統一 settle 為 `model_error`，另設碼需解析 pi 內部訊息且 retry/backoff 本屬 pi 範疇（拍板記錄：`providers.md` §上游失敗碼）
+- i18n 字典清理（#221）：刪除 82 個無消費 keys（三語）——main 與 web-next 皆零引用的舊稿文案（story_scene/hero_/landing_ 等），以及無 mode 定稿取消的段落詞彙（TeacherMode、teacher_plan/account_kind/plan、admin 教師申請 tab、教師建學生帳號的 students_* 舊稿——窗口拍板取代）；拆分單 #178–#188 的預載詞彙（login/admin/settings/community/chat 等）**保留**
+
 ## 2026-11-21 — 設定頁重構：分類導覽與對話偏好（`split/184-settings`，#184）
 
 ### Added
@@ -12,7 +26,7 @@
 
 ### Changed
 
-- 設定頁版面由單欄卡片改為 200px 導覷列＋內容 panel；`ProviderKeys`（含 #146 月配額編輯器）原元件移植進 keys 區 re-skin；keys 區標題由元件自帶的 h2 承擔（不重複區標題）、section 導覷按鈕 focus ring 對齊設計系統（`focus-visible` ember）
+- 設定頁版面由單欄卡片改為 200px 導覷列＋內容 panel；`ProviderKeys`（含 #146 月配額編輯器）原元件移植進 keys 區 re-skin；keys 區標題由元件自帶的 h2 承擔（不重複區標題）、section 導覽按鈕 focus ring 對齊設計系統（`focus-visible` ember）
 
 ## 2026-11-21 — Teacher BYOK 額度與警示 email（`feat/146-teacher-byok-quota`）
 
