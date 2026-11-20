@@ -79,6 +79,12 @@
 - values-constellation-3d 的軌跡未移植：報告只有最終落點，沒有逐輪資料
 - 後端與 `docs/api-contract.md` §7 的形狀零變動
 
+## 2026-11-20 — LLM 失敗不再回傳假內容（`fix/160-no-canned-llm-content`，#160）
+
+### Fixed
+
+- `POST /api/topics/generate`、`POST /api/lookup`：沒有 `AI` binding 或 pipeline 失敗（lookup 含模型回空白）時回 502 `llm_unavailable`，不再回固定的假題目／假說明（前端原本分不出真假）；固定內容只在 `LLM_PROVIDER=mock` 回傳
+
 ## 2026-11-19 — 對話視圖重構：companion 小窗、ChatLayout、btw panel 接線（`split/180-dialogue`，#180）
 
 ### Added
