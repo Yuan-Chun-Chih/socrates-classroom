@@ -46,7 +46,8 @@
     "enabled": true,
     "domains": {
       "react": "recommended",
-      "test": "recommended"
+      "test": "recommended",
+      "types": "all"
     },
     "rules": {
       "preset": "recommended",
@@ -63,16 +64,26 @@
       "nursery": {
         "useReactCompiler": "error",
         "noUselessTypeConversion": "error",
-        "noReturnInFinally": "error"
+        "noReturnInFinally": "error",
+        // Probe-verified 2026-11-21 at tip 736c742: 6/6 findings are false positives — the rule
+        // cannot resolve function-typed parameters, narrowed locals, or overload sets, only
+        // this.#field reads. Revisit when the nursery inference matures.
+        "useAwaitThenable": "off"
       },
       "security": {
         "noDangerouslySetInnerHtml": "error"
       },
       "suspicious": {
         "noExplicitAny": "error",
+        "useArraySortCompare": "error",
         "noArrayIndexKey": "error",
         "noConsole": "error",
-        "noDebugger": "error"
+        "noDebugger": "error",
+        // Probe-triaged 2026-11-21 at tip 736c742: 31 findings, ~76% false positives across three
+        // families the inference cannot handle — TanStack's discriminated-union isPending (resolved
+        // always-falsy with no initialData in play), ref/field mutation across closures, and index
+        // access that only noUncheckedIndexedAccess (#293 step 4) would legitimize. Revisit upstream.
+        "noUnnecessaryConditions": "off"
       }
     }
   },
