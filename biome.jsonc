@@ -136,6 +136,16 @@
           }
         }
       }
+    },
+    {
+      "includes": ["apps/web/dev/**"],
+      "linter": {
+        "rules": {
+          "suspicious": {
+            "noConsole": "off"
+          }
+        }
+      }
     }
   ],
   "json": {
