@@ -26,10 +26,14 @@ import {
 import { ensureParticipant } from "../services/members";
 import {
   OAuthError,
+  facebookAuthorizeUrl,
+  facebookProfile,
   googleAuthorizeUrl,
   googleProfile,
   isOAuthProvider,
+  oauthProviders,
   randomToken,
+  type FacebookConfig,
   type GoogleConfig,
   type OAuthPending,
   type OAuthProfile,
@@ -52,6 +56,10 @@ interface UserRow {
 
 export function authRoutes() {
   return new Hono<AppEnv>()
+    .get("/auth/providers", (c) => {
+      c.header("Cache-Control", "public, max-age=300");
+      return c.json({ providers: oauthProviders(c.env) });
+    })
     .get("/me", (c) => c.json(c.get("user")))
     .post("/auth/login", async (c) => {
       await enforceIpLimit(c, "login", 30);
@@ -143,8 +151,8 @@ export function authRoutes() {
       await enforceIpLimit(c, "oauth", 30);
       const provider = c.req.param("provider");
       if (!isOAuthProvider(provider)) fail(404, "not_found");
-      const config = googleConfig(c);
-      if (!config) return oauthFailure(c, "oauth_unavailable");
+      const runtime = providerRuntime(c, provider);
+      if (!runtime) return oauthFailure(c, "oauth_unavailable");
       const pending: OAuthPending = {
         provider,
         state: randomToken(),
@@ -159,7 +167,7 @@ export function authRoutes() {
         path: OAUTH_COOKIE_PATH,
         maxAge: OAUTH_TTL_SECONDS,
       });
-      return c.redirect(await googleAuthorizeUrl(config, pending), 302);
+      return c.redirect(await runtime.authorizeUrl(pending), 302);
     })
     .get("/auth/oauth/:provider/callback", async (c) => {
       await enforceIpLimit(c, "oauth", 30);
@@ -173,16 +181,17 @@ export function authRoutes() {
         return oauthFailure(c, "oauth_state_invalid");
       }
       if (c.req.query("error") || !code) return oauthFailure(c, "oauth_failed");
-      const config = googleConfig(c);
-      if (!config) return oauthFailure(c, "oauth_unavailable");
+      const runtime = providerRuntime(c, provider);
+      if (!runtime) return oauthFailure(c, "oauth_unavailable");
       let profile: OAuthProfile;
       try {
-        profile = await googleProfile(config, code, pending);
+        profile = await runtime.profile(code, pending);
       } catch (error) {
         if (error instanceof OAuthError) return oauthFailure(c, error.code);
         throw error;
       }
       const user = await userForIdentity(c, provider, profile);
+      if (!user) return oauthFailure(c, "account_disabled");
       await startSession(c, user);
       return c.redirect(OAUTH_SUCCESS_PATH, 302);
     })
@@ -192,24 +201,50 @@ export function authRoutes() {
     });
 }
 
-function googleConfig(c: Ctx): GoogleConfig | null {
-  const clientId = c.env.GOOGLE_CLIENT_ID;
-  const clientSecret = c.env.GOOGLE_CLIENT_SECRET;
-  if (!clientId || !clientSecret) return null;
+interface ProviderRuntime {
+  authorizeUrl: (pending: OAuthPending) => Promise<string>;
+  profile: (code: string, pending: OAuthPending) => Promise<OAuthProfile>;
+}
+
+function providerRuntime(c: Ctx, provider: OAuthProvider): ProviderRuntime | null {
   const base = c.env.PUBLIC_BASE_URL?.replace(/\/$/, "") || new URL(c.req.url).origin;
-  return { clientId, clientSecret, redirectUri: `${base}/api/auth/oauth/google/callback` };
+  if (provider === "google") {
+    const clientId = c.env.GOOGLE_CLIENT_ID;
+    const clientSecret = c.env.GOOGLE_CLIENT_SECRET;
+    if (!clientId || !clientSecret) return null;
+    const config: GoogleConfig = { clientId, clientSecret, redirectUri: `${base}/api/auth/oauth/google/callback` };
+    return {
+      authorizeUrl: (pending) => googleAuthorizeUrl(config, pending),
+      profile: (code, pending) => googleProfile(config, code, pending),
+    };
+  }
+  const appId = c.env.FACEBOOK_APP_ID;
+  const appSecret = c.env.FACEBOOK_APP_SECRET;
+  if (!appId || !appSecret) return null;
+  const config: FacebookConfig = { appId, appSecret, redirectUri: `${base}/api/auth/oauth/facebook/callback` };
+  return {
+    authorizeUrl: (pending) => Promise.resolve(facebookAuthorizeUrl(config, pending)),
+    profile: (code) => facebookProfile(config, code),
+  };
 }
 
 function oauthFailure(c: Ctx, code: ErrorCode): Response {
   return c.redirect(`/login?error=${code}`, 302);
 }
 
-async function userForIdentity(c: Ctx, provider: OAuthProvider, profile: OAuthProfile): Promise<User> {
+async function userForIdentity(c: Ctx, provider: OAuthProvider, profile: OAuthProfile): Promise<User | null> {
   const findSql =
-    "SELECT u.id, u.name, u.is_admin FROM user_identities i JOIN users u ON u.id = i.user_id WHERE i.provider = $provider AND i.provider_user_id = $subject";
+    "SELECT u.id, u.name, u.is_admin, u.disabled_at FROM user_identities i JOIN users u ON u.id = i.user_id WHERE i.provider = $provider AND i.provider_user_id = $subject";
   const key = { provider, subject: profile.subject };
-  const existing = await one<{ id: string; name: string; is_admin: number }>(c.env.DB, findSql, key);
-  if (existing) return toUser(existing);
+  const existing = await one<{ id: string; name: string; is_admin: number; disabled_at: string | null }>(
+    c.env.DB,
+    findSql,
+    key,
+  );
+  if (existing) {
+    if (existing.disabled_at !== null) return null;
+    return toUser(existing);
+  }
   const id = newId("u_");
   const at = nowIso();
   try {
@@ -225,8 +260,12 @@ async function userForIdentity(c: Ctx, provider: OAuthProvider, profile: OAuthPr
     ]);
   } catch (error) {
     if (!uniqueViolationColumns(error).some(([table]) => table === "user_identities")) throw error;
-    const raced = await one<{ id: string; name: string; is_admin: number }>(c.env.DB, findSql, key);
-    if (!raced) throw error;
+    const raced = await one<{ id: string; name: string; is_admin: number; disabled_at: string | null }>(
+      c.env.DB,
+      findSql,
+      key,
+    );
+    if (!raced || raced.disabled_at !== null) return null;
     return toUser(raced);
   }
   return { id, name: profile.name, isAdmin: false };
