@@ -13,7 +13,7 @@
 | D4  | 對話走 WebSocket（`/agents/chat/:name`，view＋chord ops），SSE 已於 web-next 重建時退役                                                                                                     | 單一真相在 pi transcript；前端 applyImmutable 套件                                       |
 | D5  | 全 Node 化（pnpm workspaces + vitest）；cf 指令走 Node ≥26.12                                                                                                                               | `cf` 載 `cloudflare.config.ts` 不支援 Bun；Node 版本對齊 root AGENTS.md 與 CI（node 26） |
 | D6  | Platform chain（providers.config.yaml）：workers-ai（單 provider，全 CF）；teacher keys（任意 pi builtin provider）排鏈首，平台鏈墊底。自架 DGX Spark 腿暫時移除（等 Tunnel＋key 管控回歸） | 平台鏈全 ZDR；teacher keyed 流量 ToS 移轉老師（2026-11-09）                              |
-| D7  | Teacher keys：老師一 provider 一把 key（#82），學生無 BYOK 入口，byok 端點已退役                                                                                                            | 學生流量一律走平台鏈，ZDR 責任單一                                                       |
+| D7  | BYOK 採帳戶級設定，每個 provider 一把 key，對話的 credential owner 見 [Gateway](#5-gatewayappsserversrcgateway)                                                                             | 單人對話由使用者管理，教室活動由教師管理                                                 |
 | D8  | CI/CD：GitHub Actions 官方 cf 範本（build once → dry-run → `--prebuilt` deploy）                                                                                                            | cf 無官方 action，純 steps 是欽定方式                                                    |
 
 ## 1. 系統拓撲
@@ -178,7 +178,7 @@ provider 政策層（v3 的 ProviderPool/whitelist 退役）。**單一配置點
 
 **請求層 vs 決策層**：fallback legs 的試錯、retry 退避由 pi 原生（`streamWithFallback`／`settings.retry`）；gateway 只決定「誰該拿到哪條 legs、誰的錢、記誰的帳」。調查過 LiteLLM Router／pi-router／pi-fallback-provider（#98 留言，2026-11-06）——結論：不引入，pi 原生＋三個小件已涵蓋。
 
-**credential**：`platform`（env）／`teacher:{user_id}`（D1 `teacher_keys`，一 provider 一把 key，AES-GCM）。學生無 BYOK（#82 定案）。teacher key 設定頁是前端配套（#82）。
+**credential** 以 `platform`（env）或 `teacher:{user_id}`（D1 `teacher_keys`，每個 provider 一把 key，AES-GCM）識別。單人對話以 DO name 中的 thread 擁有者為 credential owner。教室對話以 activity 所屬 classroom 的教師為 credential owner。Model legs、credential lookup 與 usage ledger 都使用同一個帳戶。帳戶的 model legs 優先，沒有可用的帳戶 model leg 時使用 ZDR platform chain。
 
 **traffic class**：interactive（對話/lookup）／judgment（分類）／batch（報告/生成）——agent profile 只寫角色，model 全由這裡解析（#113）。
 
@@ -261,7 +261,7 @@ apps/web/src/api        import { hc } from "hono/client"; hc<RpcApp>("/api")
 - **D1 vs DO SQLite**（D2）：D1 有 SQL 檔遷移、查詢分析、跨 DO 共享；pi 私有狀態本來就自帶 schema 管理
 - **WS 直上**（D4）：SSE adapter 於 web-next 重建時退役——pi transcript 是唯一真相，view＋chord ops 的快照恢復（斷線重連）原生免實作
 - **Teacher keys 一 provider 一 key**（D6/D7）：teacher keyed 流量 ToS 移轉老師——平台無法稽核任意 provider×model 空間（2026-11-09 拍板）
-- **Teacher keys 加密**（D7）：`BYOK_ENC_KEY` AES-GCM；key 永不進 log、永不回前端明文；學生無 BYOK 入口（#82 定案）
+- **BYOK 加密**（D7）使用 `BYOK_ENC_KEY` AES-GCM。Key 明文不進 log 或 API response。
 
 ## 12. 風險與對策
 
