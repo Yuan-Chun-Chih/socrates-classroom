@@ -1,5 +1,5 @@
 import { env } from "cloudflare:workers";
-import { applyD1Migrations, runInDurableObject } from "cloudflare:test";
+import { applyD1Migrations, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
 import { inject } from "vitest";
 import { run } from "../src/db/d1";
@@ -24,7 +24,17 @@ import {
   toClassReport,
   toPlannedClassReport,
 } from "../src/do/report-runner";
-import { call, classroomWithActivity, cookieOf, must, participantIdOf, registerStudent, speak } from "./helpers";
+import {
+  call,
+  classroomWithActivity,
+  cookieOf,
+  createClassroom,
+  systemTopicId,
+  must,
+  participantIdOf,
+  registerStudent,
+  speak,
+} from "./helpers";
 
 let teacherCookie: string;
 let classroomCode: string;
@@ -43,7 +53,14 @@ beforeAll(async () => {
   });
   expect(login.status).toBe(200);
   teacherCookie = cookieOf(login);
-  const created = await classroomWithActivity(teacherCookie, "報告班");
+  const classroom = await createClassroom(teacherCookie, "報告班");
+  const started = await call(`/api/classrooms/${classroom.classroomId}/activities`, {
+    method: "POST",
+    headers: { Cookie: teacherCookie, "Content-Type": "application/json" },
+    body: JSON.stringify({ topicId: await systemTopicId(teacherCookie), reportAxes: "ai" }),
+  });
+  expect(started.status).toBe(201);
+  const created = { ...classroom, activityId: ((await started.json()) as { activityId: string }).activityId };
   classroomCode = created.code;
   activityId = created.activityId;
 
@@ -97,6 +114,69 @@ describe("reportAlarmPlan", () => {
 });
 
 describe("report pipeline (transcript from Chat DO → ReportRunner → §7 shape)", () => {
+  it("finish schedules the topic axes as the complete report plan", async () => {
+    const classroom = await createClassroom(teacherCookie, "老師設軸班");
+    const axes = [{ name: "價值取捨", left: "個人自由", right: "共同責任" }];
+    const topic = await call(`/api/classrooms/${classroom.classroomId}/topics`, {
+      method: "POST",
+      headers: { Cookie: teacherCookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ title: "課堂題目", statement: "如何取捨？", prompts: [], axes }),
+    });
+    expect(topic.status).toBe(201);
+    const { id } = (await topic.json()) as { id: string };
+    const started = await call(`/api/classrooms/${classroom.classroomId}/activities`, {
+      method: "POST",
+      headers: { Cookie: teacherCookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ topicId: id, reportAxes: "teacher" }),
+    });
+    expect(started.status).toBe(201);
+    const { activityId } = (await started.json()) as { activityId: string };
+    const finish = await call(`/api/activities/${activityId}/finish`, {
+      method: "POST",
+      headers: { Cookie: teacherCookie, "CF-Connecting-IP": "198.51.100.21" },
+    });
+    expect(finish.status).toBe(204);
+
+    const plan = await runInDurableObject(env.ReportRunner.getByName(activityId), (_runner, state) =>
+      state.storage.get("axesPlan"),
+    );
+    expect(plan).toEqual({ count: 1, teacher: axes });
+  });
+
+  it.each(["teacher", "ai"] as const)(
+    "finishes an empty %s activity with a ready report",
+    async (reportAxes) => {
+      const classroom = await createClassroom(teacherCookie, `空名冊班 ${reportAxes}`);
+      const started = await call(`/api/classrooms/${classroom.classroomId}/activities`, {
+        method: "POST",
+        headers: { Cookie: teacherCookie, "Content-Type": "application/json" },
+        body: JSON.stringify({ topicId: await systemTopicId(teacherCookie), reportAxes }),
+      });
+      expect(started.status).toBe(201);
+      const { activityId } = (await started.json()) as { activityId: string };
+      const finish = await call(`/api/activities/${activityId}/finish`, {
+        method: "POST",
+        headers: { Cookie: teacherCookie, "CF-Connecting-IP": "198.51.100.24" },
+      });
+      expect(finish.status).toBe(204);
+
+      await runDurableObjectAlarm(env.ReportRunner.getByName(activityId));
+      await expect
+        .poll(
+          async () => {
+            const response = await call(`/api/activities/${activityId}/report`, { headers: { Cookie: teacherCookie } });
+            return { status: response.status, body: await response.json() };
+          },
+          { timeout: 10_000 },
+        )
+        .toMatchObject({
+          status: 200,
+          body: { students: [], classReport: { students: [], unstated: [], axes: [], overview: [expect.any(String)] } },
+        });
+    },
+    30_000,
+  );
+
   it("finish → alarm generates → ready; teacher sees the whole class, student sees their own, shape matches §7", async () => {
     let report: Response | null = null;
     for (let i = 0; i < 120; i += 1) {
