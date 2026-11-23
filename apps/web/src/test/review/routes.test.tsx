@@ -6,6 +6,7 @@ import { createMemoryHistory, createRouter, RouterProvider } from "@tanstack/rea
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { routeTree } from "@/routeTree.gen";
 import { activityLiveOptions } from "@/api/queries";
+import type { TeacherReport } from "@/api";
 import { setLocale } from "@/i18n";
 import { onExpression } from "@/lib/companion";
 
@@ -157,6 +158,118 @@ async function mountRoute(url: string, client = new QueryClient({ defaultOptions
     client.clear();
   };
 }
+
+const reportStudent = {
+  participantId: "p_1",
+  participantName: "Student with a position",
+  pseudonym: "Student 1",
+  analysis: {
+    stated: true,
+    claim: { text: "Justice requires consistency", turns: [1] },
+    reasons: { text: "Similar cases should be treated alike", turns: [1] },
+    tension: null,
+  },
+  positions: [],
+  violations: [],
+  indicators: null,
+  engagement: null,
+} satisfies TeacherReport["students"][number];
+
+function mockReport(report: unknown) {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: RequestInfo | URL) => {
+      const path = new URL(String(input), "http://localhost").pathname;
+      if (path === "/api/me") return Response.json({ id: "user-1", name: "User", isAdmin: false });
+      if (path === "/api/activities/activity-1/report") return Response.json(report);
+      throw new Error(`Unexpected request: ${path}`);
+    }),
+  );
+}
+
+test("59: teacher reminders lead to the selected report even if analysis failed", async () => {
+  mockReport({
+    topicTitle: topic.title,
+    classReport: { overview: ["Class summary"], axes: [], students: [], unstated: ["Student 2"] },
+    engagementVisibility: { classReport: false, student: false },
+    students: [
+      reportStudent,
+      { ...reportStudent, participantId: "p_2", participantName: "Quiet Student", pseudonym: "Student 2" },
+      {
+        ...reportStudent,
+        participantId: "p_3",
+        participantName: "Flagged Student",
+        pseudonym: "Student 3",
+        analysis: null,
+        violations: [
+          { turn: 1, type: "math", excerpt: "Solve this equation" },
+          { turn: 2, type: "math", excerpt: "Solve the next one too" },
+        ],
+      },
+    ],
+  } satisfies TeacherReport);
+
+  const dispose = await mountRoute("/report/activity-1");
+  try {
+    const reminders = await screen.findByRole("region", { name: "Teacher reminders" });
+    const headings = screen.getAllByRole("heading", { level: 2 });
+    expect(headings[0]?.textContent).toBe("Teacher reminders");
+    expect(within(reminders).getByRole("heading", { name: "Off-topic activity" })).toBeTruthy();
+    expect(within(reminders).getByRole("heading", { name: "No position expressed" })).toBeTruthy();
+    expect(within(reminders).getByRole("heading", { name: "Analysis incomplete" })).toBeTruthy();
+    expect(within(reminders).getAllByText("Math homework")).toHaveLength(1);
+    expect(within(reminders).queryByText(reportStudent.participantName)).toBeNull();
+
+    const user = userEvent.setup();
+    const entry = within(reminders).getByRole("button", { name: "Flagged Student Math homework" });
+    entry.focus();
+    await user.keyboard("{Enter}");
+    const heading = screen.getByRole("heading", { name: "Flagged Student" });
+    expect(document.activeElement).toBe(heading);
+    expect(screen.getByText("No analysis available")).toBeTruthy();
+    expect(screen.getByText(/Math homework.*Solve this equation/)).toBeTruthy();
+  } finally {
+    dispose();
+  }
+});
+
+test("59: a clear teacher report displays the empty reminder message", async () => {
+  setLocale("zh-TW");
+  mockReport({
+    topicTitle: topic.title,
+    classReport: null,
+    engagementVisibility: { classReport: false, student: false },
+    students: [{ ...reportStudent, violations: [{ turn: 1, type: "on_topic", excerpt: "Relevant contribution" }] }],
+  } satisfies TeacherReport);
+  const dispose = await mountRoute("/report/activity-1");
+  try {
+    const reminders = await screen.findByRole("region", { name: "教師提醒" });
+    expect(within(reminders).getByText("這場沒有需要留意的學生")).toBeTruthy();
+    expect(within(reminders).queryByRole("button")).toBeNull();
+  } finally {
+    dispose();
+  }
+});
+
+test.each([
+  ["zh-TW", "程式作業"],
+  ["en", "Coding homework"],
+  ["es", "Tarea de programación"],
+] as const)("59: individual reports in %s translate off-topic records", async (locale, label) => {
+  setLocale(locale);
+  mockReport({
+    topicTitle: topic.title,
+    ...reportStudent,
+    violations: [{ turn: 1, type: "coding", excerpt: "Write this program" }],
+  });
+  const dispose = await mountRoute("/report/activity-1");
+  try {
+    expect(await screen.findByText(new RegExp(`${label}.*Write this program`))).toBeTruthy();
+    expect(screen.queryByRole("region")).toBeNull();
+  } finally {
+    dispose();
+  }
+});
 
 test("F01: a signed-out visitor picks guest and gets the name field and required consent", async () => {
   vi.stubGlobal(

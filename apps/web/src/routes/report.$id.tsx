@@ -2,6 +2,7 @@ import { useState } from "react";
 import { activityOptions, classroomsOptions, reportOptions } from "@/api/queries";
 import { createFileRoute, redirect, useNavigate } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Flag } from "lucide-react";
 import {
   ApiError,
   api,
@@ -10,6 +11,7 @@ import {
   type Report,
   type ReportPosition,
   type StudentAnalysis,
+  type TeacherReport,
   type ViolationSlice,
 } from "@/api";
 import { meOf } from "@/api/me";
@@ -36,7 +38,7 @@ function ReportPage() {
   const { id } = Route.useParams();
   const navigate = useNavigate();
   const [view, setView] = useState<"group" | "individual">("group");
-  const [studentIdx, setStudentIdx] = useState(0);
+  const [studentId, setStudentId] = useState<string | null>(null);
   const report = useQuery(reportOptions(id));
   const err = report.isError && report.error instanceof ApiError ? report.error : null;
   const failed = err?.code === "report_failed";
@@ -91,7 +93,9 @@ function ReportPage() {
 
   const data = report.data;
   const isTeacherView = "students" in data;
-  const person = isTeacherView ? data.students[Math.min(studentIdx, data.students.length - 1)] : data;
+  const person = isTeacherView
+    ? (data.students.find((student) => student.participantId === studentId) ?? data.students[0])
+    : null;
 
   return (
     <div className="mx-auto w-full max-w-4xl px-5 py-8">
@@ -117,15 +121,22 @@ function ReportPage() {
 
       {!isTeacherView && (
         <section className="mt-6 flex flex-col gap-6">
-          <p className="text-[14px] text-ink-soft">{person.participantName}</p>
-          <Positions positions={person.positions} />
-          <Analysis analysis={person.analysis} violations={person.violations} />
-          {person.engagement && <EngagementPanel engagement={person.engagement} />}
+          <p className="text-[14px] text-ink-soft">{data.participantName}</p>
+          <Positions positions={data.positions} />
+          <Analysis analysis={data.analysis} violations={data.violations} />
+          {data.engagement && <EngagementPanel engagement={data.engagement} />}
         </section>
       )}
 
       {isTeacherView && view === "group" && (
         <section className="mt-6 flex flex-col gap-8">
+          <TeacherReminders
+            report={data}
+            onSelect={(id) => {
+              setStudentId(id);
+              setView("individual");
+            }}
+          />
           {data.classReport ? (
             <>
               <div className="flex flex-col gap-2">
@@ -159,13 +170,6 @@ function ReportPage() {
                   </div>
                 ))}
               </div>
-
-              {data.classReport.unstated.length > 0 && (
-                <div className="flex flex-col gap-2">
-                  <h2 className="font-serif text-lg font-semibold text-ink">{t("report_unstated")}</h2>
-                  <p className="text-[14px] text-ink-soft">{data.classReport.unstated.join("、")}</p>
-                </div>
-              )}
             </>
           ) : (
             <div className="rounded-2xl border border-line bg-card p-5">
@@ -183,14 +187,15 @@ function ReportPage() {
       {isTeacherView && view === "individual" && person && (
         <section className="mt-6 flex flex-col gap-6">
           <div className="flex flex-wrap gap-2">
-            {data.students.map((student, index) => (
+            {data.students.map((student) => (
               <button
                 type="button"
                 key={student.participantId}
-                onClick={() => setStudentIdx(index)}
+                onClick={() => setStudentId(student.participantId)}
+                aria-pressed={student.participantId === person.participantId}
                 className={cn(
                   "rounded-full border px-3.5 py-1.5 text-[13px] transition-colors",
-                  index === studentIdx
+                  student.participantId === person.participantId
                     ? "border-ember bg-ember-wash font-medium text-ember"
                     : "border-line bg-card text-ink-soft",
                 )}
@@ -202,6 +207,13 @@ function ReportPage() {
               </button>
             ))}
           </div>
+          <h2
+            tabIndex={-1}
+            ref={focusStudentHeading}
+            className="font-serif text-xl font-semibold text-ink wrap-anywhere"
+          >
+            {person.participantName}
+          </h2>
           <Positions positions={person.positions} />
           <Analysis analysis={person.analysis} violations={person.violations} />
           <EngagementPanel engagement={person.engagement} />
@@ -327,6 +339,78 @@ function ClassEngagement({ rows }: { rows: Array<{ pseudonym: string; engagement
   );
 }
 
+function focusStudentHeading(heading: HTMLHeadingElement | null) {
+  heading?.focus();
+}
+
+function offTopicViolations(violations: ViolationSlice[]) {
+  return violations.flatMap((violation) =>
+    violation.type === "on_topic" ? [] : [{ ...violation, type: violation.type }],
+  );
+}
+
+function TeacherReminders({ report, onSelect }: { report: TeacherReport; onSelect: (id: string) => void }) {
+  const t = useT();
+  const unstated = new Set(report.classReport?.unstated);
+  const groups = [
+    {
+      label: "report_attention_off_topic",
+      entries: report.students.flatMap((student) => {
+        const types = [...new Set(offTopicViolations(student.violations).map(({ type }) => type))];
+        return types.length ? [{ student, detail: types.map((type) => t(`live_flag_${type}`)).join(" · ") }] : [];
+      }),
+    },
+    {
+      label: "report_attention_unstated",
+      entries: report.students
+        .filter((student) => student.analysis?.stated === false || unstated.has(student.pseudonym))
+        .map((student) => ({ student, detail: null })),
+    },
+    {
+      label: "report_attention_incomplete",
+      entries: report.students
+        .filter((student) => student.analysis === null)
+        .map((student) => ({ student, detail: null })),
+    },
+  ] as const;
+  const visibleGroups = groups.filter(({ entries }) => entries.length > 0);
+
+  return (
+    <section aria-labelledby="teacher-reminders-title" className="rounded-2xl border border-line bg-card p-4 sm:p-5">
+      <h2 id="teacher-reminders-title" className="flex items-center gap-2 font-serif text-lg font-semibold text-ink">
+        <Flag className="size-4 shrink-0 text-flag" aria-hidden />
+        {t("report_attention")}
+      </h2>
+      {visibleGroups.length === 0 ? (
+        <p className="mt-2 text-sm text-ink-soft">{t("report_attention_empty")}</p>
+      ) : (
+        <div className="mt-4 grid grid-cols-[repeat(auto-fit,minmax(min(100%,12rem),1fr))] gap-3">
+          {visibleGroups.map(({ label, entries }) => (
+            <div key={label} className="min-w-0 rounded-xl border border-line px-3 py-2">
+              <h3 className="px-1 pt-1 text-sm font-semibold text-ink">{t(label)}</h3>
+              <ul className="mt-1 divide-y divide-line">
+                {entries.map(({ student, detail }) => (
+                  <li key={student.participantId}>
+                    <button
+                      type="button"
+                      onClick={() => onSelect(student.participantId)}
+                      className="flex min-h-11 w-full cursor-pointer flex-col justify-center rounded-lg px-1 py-1.5 text-start text-sm font-medium text-ember wrap-anywhere hover:bg-paper-deep hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ember"
+                    >
+                      {student.participantName}
+                      {detail && " "}
+                      {detail && <span className="text-xs font-normal text-ink-soft">{detail}</span>}
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
 function Positions({ positions }: { positions: ReportPosition[] }) {
   const t = useT();
   if (positions.length === 0) return null;
@@ -348,9 +432,34 @@ function Positions({ positions }: { positions: ReportPosition[] }) {
 
 function Analysis({ analysis, violations }: { analysis: StudentAnalysis | null; violations: ViolationSlice[] }) {
   const t = useT();
-  if (!analysis) {
-    return <p className="text-[14px] text-ink-faint">{t("report_no_data")}</p>;
-  }
+  const offTopic = offTopicViolations(violations);
+  return (
+    <div className="flex max-w-2xl flex-col gap-4">
+      {analysis ? (
+        <ArgumentSummary analysis={analysis} />
+      ) : (
+        <p className="text-[14px] text-ink-faint">{t("report_no_data")}</p>
+      )}
+      {offTopic.length > 0 && (
+        <div className="flex flex-col gap-2">
+          <h2 className="font-serif text-lg font-semibold text-flag">{t("report_violations")}</h2>
+          {offTopic.map((violation, index) => (
+            <p
+              // biome-ignore lint/suspicious/noArrayIndexKey: several violations can share one turn; the index disambiguates
+              key={`${violation.turn}-${violation.type}-${index}`}
+              className="rounded-xl bg-flag-wash px-4 py-2 text-[13px] text-ink-soft wrap-anywhere"
+            >
+              #{violation.turn} · {t(`live_flag_${violation.type}`)} —「{violation.excerpt}」
+            </p>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ArgumentSummary({ analysis }: { analysis: StudentAnalysis }) {
+  const t = useT();
   const turns = (ids: readonly number[]) => t("report_turn_ref", { turns: ids.join("、") });
   return (
     <div className="flex max-w-2xl flex-col gap-4">
@@ -380,20 +489,6 @@ function Analysis({ analysis, violations }: { analysis: StudentAnalysis | null; 
           <p className="text-[13px] font-medium text-moss">{t("report_doing")}</p>
           <p className="mt-1 text-[14.5px] text-ink">{analysis.doing.text}</p>
           <p className="mt-0.5 text-[12.5px] text-ink-faint">{turns(analysis.doing.turns)}</p>
-        </div>
-      )}
-      {violations.length > 0 && (
-        <div className="flex flex-col gap-2">
-          <h3 className="text-[14px] font-medium text-flag">{t("report_violations")}</h3>
-          {violations.map((violation, index) => (
-            <p
-              // biome-ignore lint/suspicious/noArrayIndexKey: several violations can share one turn; the index disambiguates
-              key={`${violation.turn}-${violation.type}-${index}`}
-              className="rounded-xl bg-flag-wash px-4 py-2 text-[13px] text-ink-soft"
-            >
-              #{violation.turn} · {violation.type} —「{violation.excerpt}」
-            </p>
-          ))}
         </div>
       )}
     </div>
